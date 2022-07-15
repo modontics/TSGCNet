@@ -10,8 +10,6 @@ import pandas as pd
 from dataloader import generate_plyfile, plydataset
 
 
-
-
 def compute_cat_iou(pred,target,iou_tabel):  # pred [B,N,C] target [B,N]
     iou_list = []
     target = target.cpu().data.numpy()
@@ -51,7 +49,7 @@ def compute_overall_iou(pred, target, num_classes):
         shape_ious.append(np.mean(part_ious))
     return shape_ious
 
-def test_semseg(model, loader, num_classes = 8, gpu=True, generate_ply=False):
+def test_semseg(model, save_dir, loader, num_classes=17, gpu=True, generate_ply=False):
     '''
     Input
     :param model:
@@ -80,7 +78,7 @@ def test_semseg(model, loader, num_classes = 8, gpu=True, generate_ply=False):
         coordinate, label_face, centre = coordinate.cuda(), label_face.cuda(), centre.cuda()
 
         with torch.no_grad():
-               pred = model(coordinate)
+            pred = model(coordinate)
 
         iou_tabel, iou_list = compute_cat_iou(pred,label_face,iou_tabel)
         pred = pred.contiguous().view(-1, num_classes)
@@ -90,14 +88,16 @@ def test_semseg(model, loader, num_classes = 8, gpu=True, generate_ply=False):
         metrics['accuracy'].append(correct.item()/ (batchsize * num_point))
         label_face = pred_choice.cpu().reshape(pred_choice.shape[0], 1)
         if generate_ply:
-               #label_face=label_optimization(index_face, label_face)
-               generate_plyfile(index_face, points_face, label_face, path=("pred_global/%s") % name)
+            # label_face=label_optimization(index_face, label_face)
+            new_path = os.path.join(save_dir, name[0])
+            generate_plyfile(index_face, points_face, label_face, path=new_path)
     iou_tabel[:,2] = iou_tabel[:,0] /iou_tabel[:,1]
     hist_acc += metrics['accuracy']
     metrics['accuracy'] = np.mean(metrics['accuracy'])
     metrics['iou'] = np.mean(iou_tabel[:, 2])
     iou_tabel = pd.DataFrame(iou_tabel,columns=['iou','count','mean_iou'])
-    iou_tabel['Category_IOU'] = ["label%d"%(i) for i in range(num_classes)]
+    print("num_classes", num_classes, iou_tabel.shape)
+    iou_tabel['Category_IOU'] = ["label %d"%(i) for i in range(num_classes)]
     cat_iou = iou_tabel.groupby('Category_IOU')['mean_iou'].mean()
     mIoU = np.mean(cat_iou)
 

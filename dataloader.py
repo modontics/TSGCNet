@@ -5,14 +5,11 @@ import os
 import pandas as pd
 
 
-labels = ((255, 255, 255), (255, 0, 0), (255, 125, 0),(255, 255, 0), (0, 255, 0), (0, 255, 255),
-          (0, 0, 255), (255, 0, 255))
+labels = ((255, 255, 255), (255, 0, 0), (255, 128, 0), (128, 128, 0), (128, 255, 0), (255, 255, 0), (0, 255, 0), (0, 255, 255), (0, 128, 255), (0, 255, 128), (0, 0, 255), (128, 0, 255), (255, 0, 128), (255, 0, 255), (128, 255, 255), (255, 128, 255), (255, 255, 128)) #, (128, 0, 0), (128, 64, 0), (64, 128, 0), (64, 128, 0), (64, 64, 0), (0, 64, 0), (0, 64, 128), (0, 128, 64), (0, 64, 128), (0, 0, 64), (128, 0, 64), (64, 0, 128), (64, 0, 64), (128, 64, 64), (64, 128, 64), (64, 64, 128))
 
 
 
 def get_data(path=""):
-    labels = ([255,255,255], [255, 0, 0], [255, 125, 0], [255, 255, 0], [0, 255, 0], [0, 255, 255],
-              [0, 0, 255], [255, 0, 255])
     row_data = PlyData.read(path)  # read ply file
     points = np.array(pd.DataFrame(row_data.elements[0].data))
     faces = np.array(pd.DataFrame(row_data.elements[1].data))
@@ -20,7 +17,7 @@ def get_data(path=""):
     xyz = points[:, :3] # coordinate of vertex shape=[N, 3]
     normal = points[:, 3:]  # normal of vertex shape=[N, 3]
     label_face = np.zeros([n_face,1]).astype('int32')
-    label_face_onehot = np.zeros([n_face,8]).astype(('int32'))
+    label_face_onehot = np.zeros([n_face,17]).astype(('int32'))
     """ index of faces shape=[N, 3] """
     index_face = np.concatenate((faces[:, 0]), axis=0).reshape(n_face, 3)
     """ RGB of faces shape=[N, 3] """
@@ -47,13 +44,11 @@ def get_data(path=""):
     return index_face, points_face, label_face, label_face_onehot, points
 
 
-
-
 def generate_plyfile(index_face, point_face, label_face, path= " "):
     """
     Input:
         index_face: index of points in a face [N, 3]
-        points_face: 3 points coordinate in a face + 1 center point coordinate [N, 12]
+        points_face: 3 points coordinate and 3 normals [N, 24]
         label_face: label of face [N, 1]
         path: path to save new generated ply file
     Return:
@@ -61,7 +56,7 @@ def generate_plyfile(index_face, point_face, label_face, path= " "):
     unique_index = np.unique(index_face.flatten())  # get unique points index
     flag = np.zeros([unique_index.max()+1, 2]).astype('uint64')
     order = 0
-    with open(path, "a") as f:
+    with open(path, "w") as f:
         f.write("ply\n")
         f.write("format ascii 1.0\n")
         f.write("comment VCGLIB generated\n")
@@ -78,6 +73,9 @@ def generate_plyfile(index_face, point_face, label_face, path= " "):
         f.write("property uchar green\n")
         f.write("property uchar blue\n")
         f.write("property uchar alpha\n")
+        f.write("property float nx\n")
+        f.write("property float ny\n")
+        f.write("property float nz\n")
         f.write("end_header\n")
         for i, index in enumerate(index_face):
             for j, data in enumerate(index):
@@ -89,14 +87,13 @@ def generate_plyfile(index_face, point_face, label_face, path= " "):
                     flag[data, 0] = 1  # this point has been wrote
                     flag[data, 1] = order  # give point a new index
                     order = order + 1  # index add 1 for next point
-
+        normal_face = (point_face[:, 9:12] + point_face[:, 12:15] + point_face[:, 15:18])/3.
         for i, data in enumerate(index_face):  # write new point index for every face
-            RGB = labels_change_color[label_face[i, 0]]  # Get RGB value according to face label
+            RGB = labels[label_face[i, 0]]  # Get RGB value according to face label
             f.write(str(3) + " " + str(int(flag[data[0], 1])) + " " + str(int(flag[data[1], 1])) + " "
                     + str(int(flag[data[2], 1])) + " " + str(RGB[0]) + " " + str(RGB[1]) + " "
-                    + str(RGB[2]) + " " + str(255) + "\n")
+                    + str(RGB[2]) + " " + str(255) + " " + str(normal_face[i,0]) + " " + str(normal_face[i, 1]) + " " + str(normal_face[i, 2]) +"\n")
         f.close()
-
 
 
 class plydataset(Dataset):
@@ -143,12 +140,19 @@ class plydataset(Dataset):
             points_face[:, i + 18] = (points_face[:, i + 18] - nmeans[i]) / nstds[i]  # normal3
             points_face[:, i + 21] = (points_face[:, i + 21] - nmeans_f[i]) / nstds_f[i]  # face normal
 
-
+        # SY 12 -> 3: with our current mesh density, mesh faces are quite small,
+        # so face center and face normal as a whole is a good representation for
+        # the face already; So we do not need positions and normals of the
+        # three vertices (i.e. point 1 2 3).
+        # We can add the following line to return only face center and face normal:
+        # points_face = points_face[:, (9,10,11,21,22,23)]
+        # I have done very preliminary test which looked good, but I did not get
+        # enough time to pursue this effort; need to test/compare/verify 10+ cases.
+        # nonetheless, this change won't reduce size of TSGCNet model, its size
+        # in both memory and resulting model files, is decided by the layers in
+        # TSGCNet neural network. I have not checked difference in training and
+        # inference speed though.
         return index_face, points_face, label_face, label_face_onehot, self.file_list[item], raw_points_face
-
-
-
-
 
 
 if __name__ == "__main__":

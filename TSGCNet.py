@@ -135,63 +135,71 @@ class GraphAttention(nn.Module):
 
 
 class TSGCNet(nn.Module):
-    def __init__(self, k=16, in_channels=12, output_channels=8):
+    def __init__(self, k=16, in_channels=12, output_channels=2, num_faces=16000):
         super(TSGCNet, self).__init__()
         self.k = k
+        self.num_faces = num_faces
         ''' coordinate stream '''
         self.bn1_c = nn.BatchNorm2d(64)
-        self.bn2_c = nn.BatchNorm2d(128)
-        self.bn3_c = nn.BatchNorm2d(256)
-        self.bn4_c = nn.BatchNorm1d(512)
+        # TODO: switch back to original bn2,3,4; remove bn5
+        self.bn2_c = nn.BatchNorm2d(64)
+        self.bn3_c = nn.BatchNorm2d(128)
+        self.bn4_c = nn.BatchNorm2d(256)
+        self.bn5_c = nn.BatchNorm1d(512)
         self.conv1_c = nn.Sequential(nn.Conv2d(in_channels*2, 64, kernel_size=1, bias=False),
                                    self.bn1_c,
                                    nn.LeakyReLU(negative_slope=0.2))
 
 
-        self.conv2_c = nn.Sequential(nn.Conv2d(64*2, 128, kernel_size=1, bias=False),
+        self.conv2_c = nn.Sequential(nn.Conv2d(64*2, 64, kernel_size=1, bias=False),
                                    self.bn2_c,
                                    nn.LeakyReLU(negative_slope=0.2))
 
 
 
-        self.conv3_c = nn.Sequential(nn.Conv2d(128*2, 256, kernel_size=1, bias=False),
+        self.conv3_c = nn.Sequential(nn.Conv2d(64*2, 128, kernel_size=1, bias=False),
                                    self.bn3_c,
                                    nn.LeakyReLU(negative_slope=0.2))
 
 
 
-        self.conv4_c = nn.Sequential(nn.Conv1d(448, 512, kernel_size=1, bias=False),
-                                     self.bn4_c,
+        self.conv5_c = nn.Sequential(nn.Conv1d(256, 512, kernel_size=1, bias=False),
+                                     self.bn5_c,
                                      nn.LeakyReLU(negative_slope=0.2))
 
+        # SY 12 -> 3
         self.attention_layer1_c = GraphAttention(feature_dim=12, out_dim=64, K=self.k)
-        self.attention_layer2_c = GraphAttention(feature_dim=64, out_dim=128, K=self.k)
-        self.attention_layer3_c = GraphAttention(feature_dim=128, out_dim=256, K=self.k)
+        self.attention_layer2_c = GraphAttention(feature_dim=64, out_dim=64, K=self.k)
+        self.attention_layer3_c = GraphAttention(feature_dim=64, out_dim=128, K=self.k)
+        # SY 12 -> 3
         self.FTM_c1 = STNkd(k=12)
         ''' normal stream '''
         self.bn1_n = nn.BatchNorm2d(64)
-        self.bn2_n = nn.BatchNorm2d(128)
-        self.bn3_n = nn.BatchNorm2d(256)
-        self.bn4_n = nn.BatchNorm1d(512)
+        # TODO: switch back to original bn2,3,4; remove bn5
+        self.bn2_n = nn.BatchNorm2d(64)
+        self.bn3_n = nn.BatchNorm2d(128)
+        self.bn4_n = nn.BatchNorm2d(256)
+        self.bn5_n = nn.BatchNorm1d(512)
         self.conv1_n = nn.Sequential(nn.Conv2d((in_channels)*2, 64, kernel_size=1, bias=False),
                                      self.bn1_n,
                                      nn.LeakyReLU(negative_slope=0.2))
 
 
-        self.conv2_n = nn.Sequential(nn.Conv2d(64*2, 128, kernel_size=1, bias=False),
+        self.conv2_n = nn.Sequential(nn.Conv2d(64*2, 64, kernel_size=1, bias=False),
                                      self.bn2_n,
                                      nn.LeakyReLU(negative_slope=0.2))
 
 
-        self.conv3_n = nn.Sequential(nn.Conv2d(128*2, 256, kernel_size=1, bias=False),
+        self.conv3_n = nn.Sequential(nn.Conv2d(64*2, 128, kernel_size=1, bias=False),
                                      self.bn3_n,
                                      nn.LeakyReLU(negative_slope=0.2))
 
 
 
-        self.conv4_n = nn.Sequential(nn.Conv1d(448, 512, kernel_size=1, bias=False),
-                                     self.bn4_n,
+        self.conv5_n = nn.Sequential(nn.Conv1d(256, 512, kernel_size=1, bias=False),
+                                     self.bn5_n,
                                      nn.LeakyReLU(negative_slope=0.2))
+        # SY 12 -> 3
         self.FTM_n1 = STNkd(k=12)
 
         '''feature-wise attention'''
@@ -219,8 +227,13 @@ class TSGCNet(nn.Module):
 
 
     def forward(self, x):
+        # batch_size = x.size(0)
+        # SY 12 -> 3
         coor = x[:, :12, :]
+        # fea = coor
+        # SY 12 -> 3
         nor = x[:, 12:, :]
+        # neighbor = knn(coor[:, 9:, :], k=self.k)
 
         # transform
         trans_c = self.FTM_c1(coor)
@@ -244,24 +257,27 @@ class TSGCNet(nn.Module):
         coor2 = self.attention_layer2_c(index, coor1, coor2)
         nor2 = nor2.max(dim=-1, keepdim=False)[0]
 
-        coor3, nor3, index = get_graph_feature(coor2, nor2, k=self.k)
+        # TODO: why do we reverse coor and nor in `get_graph_feature(nor2, coor2, k=self.k)`?
+        coor3, nor3, index = get_graph_feature(nor2, coor2, k=self.k)
         coor3 = self.conv3_c(coor3)
         nor3 = self.conv3_n(nor3)
         coor3 = self.attention_layer3_c(index, coor2, coor3)
         nor3 = nor3.max(dim=-1, keepdim=False)[0]
 
         coor = torch.cat((coor1, coor2, coor3), dim=1)
-        coor = self.conv4_c(coor)
+        coor = self.conv5_c(coor)
         nor = torch.cat((nor1, nor2, nor3), dim=1)
-        nor = self.conv4_n(nor)
+        nor = self.conv5_n(nor)
 
+        # TODO: we do not really need avgSum*, and weight_coor weight_nor?
         avgSum_coor = coor.sum(1)/512
         avgSum_nor = nor.sum(1)/512
         avgSum = avgSum_coor+avgSum_nor
-        weight_coor = (avgSum_coor / avgSum).reshape(1,1,16000)
-        weight_nor = (avgSum_nor / avgSum).reshape(1,1,16000)
+        weight_coor = (avgSum_coor / avgSum).reshape(1, 1, self.num_faces)
+        weight_nor = (avgSum_nor / avgSum).reshape(1, 1, self.num_faces)
         x = torch.cat((coor*weight_coor, nor*weight_nor), dim=1)
 
+        x = torch.cat((coor, nor), dim=1)
         weight = self.fa(x)
         x = weight*x
 
@@ -281,12 +297,12 @@ class TSGCNet(nn.Module):
 
 
 if __name__ == "__main__":
-
+    num_faces = 16000
     os.environ["CUDA_VISIBLE_DEVICES"] = '0'
     # input size: [batch_size, C, N], where C is number of dimension, N is the number of mesh.
-    x = torch.rand(1,24,16000)
+    x = torch.rand(1,24,num_faces)
     x = x.cuda()
-    model = TSGCNet(in_channels=12, output_channels=8, k=32)
+    model = TSGCNet(in_channels=12, output_channels=17, k=32, num_faces=num_faces)
     model = model.cuda()
     y = model(x)
     print(y.shape)

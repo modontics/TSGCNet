@@ -1,18 +1,23 @@
 import os
-import sys
-import copy
-import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import time
 from torch.autograd import Variable
 
+
 def knn(x, k):
+    # use float16 to save GPU memory, HalfTensor is enough here; this reduced lots mem usage, so we can use 10GB GPU
+    x = x.half()
+
+    # bmm does not help on GPU memory here: inner = -2 * torch.bmm(x.transpose(2, 1), x)
     inner = -2 * torch.matmul(x.transpose(2, 1), x)
     xx = torch.sum(x ** 2, dim=1, keepdim=True)
-    pairwise_distance = -xx - inner - xx.transpose(2, 1)
+
+    # use two steps for pairwise_distance, to save GPU memory; this reduced lots mem usage, so we can use 10GB GPU
+    pairwise_distance = -xx - inner
+    xx = xx.transpose(2, 1)
+    pairwise_distance -= xx
     idx = pairwise_distance.topk(k=k+1, dim=-1)[1][:,:,1:]  # (batch_size, num_points, k)
     return idx
 
@@ -223,17 +228,11 @@ class TSGCNet(nn.Module):
         self.dp2 = nn.Dropout(p=0.6)
         self.dp3 = nn.Dropout(p=0.6)
 
-
-
-
     def forward(self, x):
-        # batch_size = x.size(0)
         # SY 12 -> 3
         coor = x[:, :12, :]
-        # fea = coor
         # SY 12 -> 3
         nor = x[:, 12:, :]
-        # neighbor = knn(coor[:, 9:, :], k=self.k)
 
         # transform
         trans_c = self.FTM_c1(coor)
@@ -257,8 +256,7 @@ class TSGCNet(nn.Module):
         coor2 = self.attention_layer2_c(index, coor1, coor2)
         nor2 = nor2.max(dim=-1, keepdim=False)[0]
 
-        # TODO: why do we reverse coor and nor in `get_graph_feature(nor2, coor2, k=self.k)`?
-        coor3, nor3, index = get_graph_feature(nor2, coor2, k=self.k)
+        coor3, nor3, index = get_graph_feature(coor2, nor2, k=self.k)
         coor3 = self.conv3_c(coor3)
         nor3 = self.conv3_n(nor3)
         coor3 = self.attention_layer3_c(index, coor2, coor3)
@@ -273,27 +271,23 @@ class TSGCNet(nn.Module):
         avgSum_coor = coor.sum(1)/512
         avgSum_nor = nor.sum(1)/512
         avgSum = avgSum_coor+avgSum_nor
-        weight_coor = (avgSum_coor / avgSum).reshape(1, 1, self.num_faces)
-        weight_nor = (avgSum_nor / avgSum).reshape(1, 1, self.num_faces)
-        x = torch.cat((coor*weight_coor, nor*weight_nor), dim=1)
-
+        coor *= (avgSum_coor / avgSum).reshape(1, 1, self.num_faces)
+        nor *= (avgSum_nor / avgSum).reshape(1, 1, self.num_faces)
         x = torch.cat((coor, nor), dim=1)
         weight = self.fa(x)
         x = weight*x
 
         x = self.pred1(x)
-        self.dp1(x)
+        # NOTE: original TSGCNet code did not reassign x after dropout, and Dropout Module use default inplace=False, so effectively it did not perform dropout!
+        x = self.dp1(x)
         x = self.pred2(x)
-        self.dp2(x)
+        x = self.dp2(x)
         x = self.pred3(x)
-        self.dp3(x)
+        x = self.dp3(x)
         score = self.pred4(x)
         score = F.log_softmax(score, dim=1)
         score = score.permute(0, 2, 1)
         return score
-
-
-
 
 
 if __name__ == "__main__":

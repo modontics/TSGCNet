@@ -8,6 +8,7 @@ from torch.autograd import Variable
 
 def knn(x, k):
     # use float16 to save GPU memory, HalfTensor is enough here; this reduced lots mem usage, so we can use 10GB GPU
+    # (batch_size, dim, num_points)
     x = x.half()
 
     # bmm does not help on GPU memory here: inner = -2 * torch.bmm(x.transpose(2, 1), x)
@@ -20,6 +21,66 @@ def knn(x, k):
     pairwise_distance -= xx
     idx = pairwise_distance.topk(k=k+1, dim=-1)[1][:,:,1:]  # (batch_size, num_points, k)
     return idx
+
+
+# TODO: we do not really exact K and exact distance, so we can look for approximation of knn solutions (eg Faiss library developed by Facebook)
+# adapted the following code from GPT-4, but it is >3x slower than matmul/pairwise_distance, and correctness not verified
+def knn_balltree(x: torch.Tensor, k):
+    from sklearn.neighbors import BallTree
+
+    x = x.transpose(2, 1)
+    batch_size, num_points, dim = x.shape
+
+    # Flatten points to a 2D tensor for ball tree calculation
+    x_flat = x.view(batch_size * num_points, dim)
+
+    with torch.no_grad():
+        # Create ball tree
+        tree = BallTree(x_flat.cpu().numpy(), leaf_size=k)
+
+        # Query ball tree
+        dist, idx = tree.query(x_flat.cpu().numpy(), k=k+1)
+
+    # Convert indices to PyTorch tensor
+    idx = torch.from_numpy(idx[:, 1:]).to(x.device)
+
+    # Reshape indices to match original tensor shape
+    idx = idx.view(batch_size, num_points, k)
+
+    return idx
+
+
+def knn_faiss_gpu():
+    """an example of using Faiss GPU for k-nearest neighbors (knn) search. NOT TESTED!
+    In this example, we generate some random data and a query tensor. We then initialize a Faiss index and train it on the data. Finally, we perform knn search on the query tensor using the trained Faiss GPU index, and print the resulting indices. Note that we convert the PyTorch tensors to numpy arrays before passing them to Faiss, and also convert the resulting indices back to PyTorch tensors if needed.
+
+    https://github.com/facebookresearch/faiss
+    https://anaconda.org/pytorch/faiss-gpu
+    """
+    import faiss
+
+    # Generate some random data
+    batch_size = 32
+    num_points = 1000
+    embedding_size = 128
+    data = torch.randn(batch_size, num_points, embedding_size)
+
+    # Initialize Faiss GPU index
+    d = embedding_size
+    index = faiss.IndexFlatL2(d)
+    res = faiss.StandardGpuResources()
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, index)
+
+    # Train the index
+    gpu_index.add(data.cpu().numpy())
+
+    # Perform knn search
+    k = 10
+    query = torch.randn(batch_size, k, embedding_size)
+    gpu_query = query.cpu().numpy()
+    _, knn_indices = gpu_index.search(gpu_query, k)
+
+    print(knn_indices)
 
 
 def index_points(points, idx):
@@ -140,10 +201,9 @@ class GraphAttention(nn.Module):
 
 
 class TSGCNet(nn.Module):
-    def __init__(self, k=16, in_channels=12, output_channels=2, num_faces=16000):
+    def __init__(self, k=16, in_channels=12, output_channels=2):
         super(TSGCNet, self).__init__()
         self.k = k
-        self.num_faces = num_faces
         ''' coordinate stream '''
         self.bn1_c = nn.BatchNorm2d(64)
         # TODO: switch back to original bn2,3,4; remove bn5
@@ -224,9 +284,12 @@ class TSGCNet(nn.Module):
                                    nn.BatchNorm1d(128),
                                    nn.LeakyReLU(negative_slope=0.2))
         self.pred4 = nn.Sequential(nn.Conv1d(128, output_channels, kernel_size=1, bias=False))
-        self.dp1 = nn.Dropout(p=0.6)
-        self.dp2 = nn.Dropout(p=0.6)
-        self.dp3 = nn.Dropout(p=0.6)
+
+        # NOTE: original p=0.6, converge too slow, change to 0.833 so it will converge faster
+        p = 0.833
+        self.dp1 = nn.Dropout(p)
+        self.dp2 = nn.Dropout(p)
+        self.dp3 = nn.Dropout(p)
 
     def forward(self, x):
         # SY 12 -> 3
@@ -249,33 +312,40 @@ class TSGCNet(nn.Module):
         nor1 = self.conv1_n(nor1)
         coor1 = self.attention_layer1_c(index, coor, coor1)
         nor1 = nor1.max(dim=-1, keepdim=False)[0]
+        # del and release intermediate variables, so we can relieve GPU mem fragment problem
+        del coor, nor
+        torch.cuda.empty_cache()
 
         coor2, nor2, index = get_graph_feature(coor1, nor1, k=self.k)
         coor2 = self.conv2_c(coor2)
         nor2 = self.conv2_n(nor2)
         coor2 = self.attention_layer2_c(index, coor1, coor2)
         nor2 = nor2.max(dim=-1, keepdim=False)[0]
+        torch.cuda.empty_cache()
 
         coor3, nor3, index = get_graph_feature(coor2, nor2, k=self.k)
         coor3 = self.conv3_c(coor3)
         nor3 = self.conv3_n(nor3)
         coor3 = self.attention_layer3_c(index, coor2, coor3)
         nor3 = nor3.max(dim=-1, keepdim=False)[0]
+        torch.cuda.empty_cache()
 
         coor = torch.cat((coor1, coor2, coor3), dim=1)
         coor = self.conv5_c(coor)
         nor = torch.cat((nor1, nor2, nor3), dim=1)
         nor = self.conv5_n(nor)
 
-        # TODO: we do not really need avgSum*, and weight_coor weight_nor?
-        avgSum_coor = coor.sum(1)/512
-        avgSum_nor = nor.sum(1)/512
-        avgSum = avgSum_coor+avgSum_nor
-        coor *= (avgSum_coor / avgSum).reshape(1, 1, self.num_faces)
-        nor *= (avgSum_nor / avgSum).reshape(1, 1, self.num_faces)
+        # TODO: do we really need average? we already normalized coordinates and normals in dataloader; and, "512" seems very arbitrary!
+        # avgSum_coor = coor.sum(1)/512
+        # avgSum_nor = nor.sum(1)/512
+        # avgSum = avgSum_coor+avgSum_nor
+        # coor *= (avgSum_coor / avgSum).reshape(1, 1, self.num_faces)
+        # nor *= (avgSum_nor / avgSum).reshape(1, 1, self.num_faces)
         x = torch.cat((coor, nor), dim=1)
         weight = self.fa(x)
-        x = weight*x
+        x = weight * x
+        del coor, nor, weight
+        torch.cuda.empty_cache()
 
         x = self.pred1(x)
         # NOTE: original TSGCNet code did not reassign x after dropout, and Dropout Module use default inplace=False, so effectively it did not perform dropout!
@@ -293,10 +363,10 @@ class TSGCNet(nn.Module):
 if __name__ == "__main__":
     num_faces = 16000
     os.environ["CUDA_VISIBLE_DEVICES"] = '0'
-    # input size: [batch_size, C, N], where C is number of dimension, N is the number of mesh.
+    # input size: [batch_size, C, N], where C is number of dimension, N is the number of mesh faces.
     x = torch.rand(1,24,num_faces)
     x = x.cuda()
-    model = TSGCNet(in_channels=12, output_channels=17, k=32, num_faces=num_faces)
+    model = TSGCNet(in_channels=12, output_channels=17, k=32)
     model = model.cuda()
     y = model(x)
     print(y.shape)

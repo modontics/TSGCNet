@@ -205,76 +205,69 @@ class TSGCNet(nn.Module):
         super(TSGCNet, self).__init__()
         self.k = k
         ''' coordinate stream '''
-        self.bn1_c = nn.BatchNorm2d(64)
-        # TODO: switch back to original bn2,3,4; remove bn5
-        self.bn2_c = nn.BatchNorm2d(64)
-        self.bn3_c = nn.BatchNorm2d(128)
-        self.bn4_c = nn.BatchNorm2d(256)
-        self.bn5_c = nn.BatchNorm1d(512)
-        self.conv1_c = nn.Sequential(nn.Conv2d(in_channels*2, 64, kernel_size=1, bias=False),
+        # NOTE: we reduced to half size of original network;
+        # we already use 4 points and 4 normals per face, that is enough input data, maybe it is too redundant, we could reduce data and increase network size
+        out1 = 32 # in_channels*2 * 2
+        out2 = out1 * 2
+        out3 = out2 * 2
+        out4 = out3 * 2
+        self.bn1_c = nn.BatchNorm2d(out1)
+        self.bn2_c = nn.BatchNorm2d(out2)
+        self.bn3_c = nn.BatchNorm2d(out3)
+        self.bn4_c = nn.BatchNorm1d(out4)
+        self.conv1_c = nn.Sequential(nn.Conv2d(in_channels*2, out1, kernel_size=1, bias=False),
                                    self.bn1_c,
                                    nn.LeakyReLU(negative_slope=0.2))
 
-
-        self.conv2_c = nn.Sequential(nn.Conv2d(64*2, 64, kernel_size=1, bias=False),
+        self.conv2_c = nn.Sequential(nn.Conv2d(out1*2, out2, kernel_size=1, bias=False),
                                    self.bn2_c,
                                    nn.LeakyReLU(negative_slope=0.2))
 
-
-
-        self.conv3_c = nn.Sequential(nn.Conv2d(64*2, 128, kernel_size=1, bias=False),
+        self.conv3_c = nn.Sequential(nn.Conv2d(out2*2, out3, kernel_size=1, bias=False),
                                    self.bn3_c,
                                    nn.LeakyReLU(negative_slope=0.2))
 
-
-
-        self.conv5_c = nn.Sequential(nn.Conv1d(256, 512, kernel_size=1, bias=False),
-                                     self.bn5_c,
+        self.conv4_c = nn.Sequential(nn.Conv1d(out1+out2+out3, out4, kernel_size=1, bias=False),
+                                     self.bn4_c,
                                      nn.LeakyReLU(negative_slope=0.2))
 
         # SY 12 -> 3
-        self.attention_layer1_c = GraphAttention(feature_dim=12, out_dim=64, K=self.k)
-        self.attention_layer2_c = GraphAttention(feature_dim=64, out_dim=64, K=self.k)
-        self.attention_layer3_c = GraphAttention(feature_dim=64, out_dim=128, K=self.k)
+        self.attention_layer1_c = GraphAttention(feature_dim=12, out_dim=out1, K=self.k)
+        self.attention_layer2_c = GraphAttention(feature_dim=out1, out_dim=out2, K=self.k)
+        self.attention_layer3_c = GraphAttention(feature_dim=out2, out_dim=out3, K=self.k)
         # SY 12 -> 3
         self.FTM_c1 = STNkd(k=12)
         ''' normal stream '''
-        self.bn1_n = nn.BatchNorm2d(64)
-        # TODO: switch back to original bn2,3,4; remove bn5
-        self.bn2_n = nn.BatchNorm2d(64)
-        self.bn3_n = nn.BatchNorm2d(128)
-        self.bn4_n = nn.BatchNorm2d(256)
-        self.bn5_n = nn.BatchNorm1d(512)
-        self.conv1_n = nn.Sequential(nn.Conv2d((in_channels)*2, 64, kernel_size=1, bias=False),
+        self.bn1_n = nn.BatchNorm2d(out1)
+        self.bn2_n = nn.BatchNorm2d(out2)
+        self.bn3_n = nn.BatchNorm2d(out3)
+        self.bn4_n = nn.BatchNorm1d(out4)
+        self.conv1_n = nn.Sequential(nn.Conv2d((in_channels)*2, out1, kernel_size=1, bias=False),
                                      self.bn1_n,
                                      nn.LeakyReLU(negative_slope=0.2))
 
-
-        self.conv2_n = nn.Sequential(nn.Conv2d(64*2, 64, kernel_size=1, bias=False),
+        self.conv2_n = nn.Sequential(nn.Conv2d(out1*2, out2, kernel_size=1, bias=False),
                                      self.bn2_n,
                                      nn.LeakyReLU(negative_slope=0.2))
 
-
-        self.conv3_n = nn.Sequential(nn.Conv2d(64*2, 128, kernel_size=1, bias=False),
+        self.conv3_n = nn.Sequential(nn.Conv2d(out2*2, out3, kernel_size=1, bias=False),
                                      self.bn3_n,
                                      nn.LeakyReLU(negative_slope=0.2))
 
-
-
-        self.conv5_n = nn.Sequential(nn.Conv1d(256, 512, kernel_size=1, bias=False),
-                                     self.bn5_n,
+        self.conv4_n = nn.Sequential(nn.Conv1d(out1+out2+out3, out4, kernel_size=1, bias=False),
+                                     self.bn4_n,
                                      nn.LeakyReLU(negative_slope=0.2))
         # SY 12 -> 3
         self.FTM_n1 = STNkd(k=12)
 
         '''feature-wise attention'''
 
-        self.fa = nn.Sequential(nn.Conv1d(1024, 1024, kernel_size=1, bias=False),
-                                nn.BatchNorm1d(1024),
+        self.fa = nn.Sequential(nn.Conv1d(out4*2, out4*2, kernel_size=1, bias=False),
+                                nn.BatchNorm1d(out4*2),
                                 nn.LeakyReLU(0.2))
 
         ''' feature fusion '''
-        self.pred1 = nn.Sequential(nn.Conv1d(1024, 512, kernel_size=1, bias=False),
+        self.pred1 = nn.Sequential(nn.Conv1d(out4*2, 512, kernel_size=1, bias=False),
                                    nn.BatchNorm1d(512),
                                    nn.LeakyReLU(negative_slope=0.2))
         self.pred2 = nn.Sequential(nn.Conv1d(512, 256, kernel_size=1, bias=False),
@@ -314,26 +307,26 @@ class TSGCNet(nn.Module):
         nor1 = nor1.max(dim=-1, keepdim=False)[0]
         # del and release intermediate variables, so we can relieve GPU mem fragment problem
         del coor, nor
-        torch.cuda.empty_cache()
+        # NOTE: calling torch.cuda.empty_cache() too often will slow down the training process
+        # torch.cuda.empty_cache()
 
         coor2, nor2, index = get_graph_feature(coor1, nor1, k=self.k)
         coor2 = self.conv2_c(coor2)
         nor2 = self.conv2_n(nor2)
         coor2 = self.attention_layer2_c(index, coor1, coor2)
         nor2 = nor2.max(dim=-1, keepdim=False)[0]
-        torch.cuda.empty_cache()
 
         coor3, nor3, index = get_graph_feature(coor2, nor2, k=self.k)
         coor3 = self.conv3_c(coor3)
         nor3 = self.conv3_n(nor3)
         coor3 = self.attention_layer3_c(index, coor2, coor3)
         nor3 = nor3.max(dim=-1, keepdim=False)[0]
-        torch.cuda.empty_cache()
 
         coor = torch.cat((coor1, coor2, coor3), dim=1)
-        coor = self.conv5_c(coor)
+        coor = self.conv4_c(coor)
         nor = torch.cat((nor1, nor2, nor3), dim=1)
-        nor = self.conv5_n(nor)
+        nor = self.conv4_n(nor)
+        del coor1, coor2, coor3, nor1, nor2, nor3
 
         # TODO: do we really need average? we already normalized coordinates and normals in dataloader; and, "512" seems very arbitrary!
         # avgSum_coor = coor.sum(1)/512
@@ -345,7 +338,6 @@ class TSGCNet(nn.Module):
         weight = self.fa(x)
         x = weight * x
         del coor, nor, weight
-        torch.cuda.empty_cache()
 
         x = self.pred1(x)
         # NOTE: original TSGCNet code did not reassign x after dropout, and Dropout Module use default inplace=False, so effectively it did not perform dropout!
@@ -357,6 +349,8 @@ class TSGCNet(nn.Module):
         score = self.pred4(x)
         score = F.log_softmax(score, dim=1)
         score = score.permute(0, 2, 1)
+
+        # print(f"forward: id {torch.cuda.current_device()} allocated {torch.cuda.memory_allocated()//(1024**2)} reserved {torch.cuda.memory_reserved()//(1024**2)}")
         return score
 
 

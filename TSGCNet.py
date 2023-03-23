@@ -278,8 +278,9 @@ class TSGCNet(nn.Module):
                                    nn.LeakyReLU(negative_slope=0.2))
         self.pred4 = nn.Sequential(nn.Conv1d(128, output_channels, kernel_size=1, bias=False))
 
-        # NOTE: original p=0.6, converge too slow, change to 0.833 so it will converge faster
-        p = 0.833
+        # nn.Dropout(p): p, probability of an element to be zeroed
+        # NOTE: original p=0.6, it may converge too slow, we change to smaller prob (as we dropout 3 times) so it will converge faster
+        p = 0.03
         self.dp1 = nn.Dropout(p)
         self.dp2 = nn.Dropout(p)
         self.dp3 = nn.Dropout(p)
@@ -340,12 +341,13 @@ class TSGCNet(nn.Module):
         del coor, nor, weight
 
         x = self.pred1(x)
-        # NOTE: original TSGCNet code did not reassign x after dropout, and Dropout Module use default inplace=False, so effectively it did not perform dropout!
-        x = self.dp1(x)
+        # TODO: original TSGCNet code did not reassign x after dropout, and Dropout Module use default inplace=False, so effectively it did not perform dropout!
+        # see https://jamesmccaffrey.wordpress.com/2019/01/23/pytorch-train-vs-eval-mode/, we need to use model.train() model.eval() correctly!
+        self.dp1(x)
         x = self.pred2(x)
-        x = self.dp2(x)
+        self.dp2(x)
         x = self.pred3(x)
-        x = self.dp3(x)
+        self.dp3(x)
         score = self.pred4(x)
         score = F.log_softmax(score, dim=1)
         score = score.permute(0, 2, 1)
